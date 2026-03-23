@@ -5,7 +5,7 @@
 - 主題領域：醫療資訊、校園心理健康、數位健康追蹤、學生福祉與早期風險辨識
 - 使用者角色：病人(對象：學生使用者)
 - 核心 FHIR Resources：Patient、Observation、Bundle
-- Demo 入口：影片連結待補
+- Demo 入口：https://youtu.be/sN1yNAFnK8Y
 - 如何執行：如下方文件記載
 
 CampusPulse 是一個示範性學生健康平台，使用 Spring Boot 3.x 提供 REST API，React 18 + Tailwind CSS 提供單頁前端。新版重點是把健康紀錄重構成更接近 FHIR 的資料形狀，並把單次打卡改成多輪聊天式收集流程。
