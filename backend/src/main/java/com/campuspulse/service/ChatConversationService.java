@@ -217,6 +217,7 @@ public class ChatConversationService {
                 : new ObservationSummaryResponse(
                 record.getId(),
                 record.getFhirId(),
+                record.getResourceUrl(),
                 record.getStatus(),
                 record.getStressScore(),
                 record.getSleepHours(),

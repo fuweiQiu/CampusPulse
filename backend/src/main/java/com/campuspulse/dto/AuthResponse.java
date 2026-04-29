@@ -5,6 +5,7 @@ public record AuthResponse(
         String displayName,
         String token,
         String patientFhirId,
+        String patientResourceUrl,
         String message
 ) {
 }

@@ -40,6 +40,9 @@ public class User {
     @Column(unique = true, length = 64)
     private String patientFhirId;
 
+    @Column(length = 255)
+    private String patientResourceUrl;
+
     @Lob
     @Column(columnDefinition = "CLOB")
     private String patientResourceJson;
@@ -122,6 +125,14 @@ public class User {
 
     public void setPatientResourceJson(String patientResourceJson) {
         this.patientResourceJson = patientResourceJson;
+    }
+
+    public String getPatientResourceUrl() {
+        return patientResourceUrl;
+    }
+
+    public void setPatientResourceUrl(String patientResourceUrl) {
+        this.patientResourceUrl = patientResourceUrl;
     }
 
     public LocalDateTime getCreatedAt() {

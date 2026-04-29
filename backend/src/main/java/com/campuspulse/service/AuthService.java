@@ -55,6 +55,7 @@ public class AuthService {
                 user.getDisplayName(),
                 user.getAuthToken(),
                 user.getPatientFhirId(),
+                user.getPatientResourceUrl(),
                 "Registration successful"
         );
     }
@@ -78,6 +79,7 @@ public class AuthService {
                 user.getDisplayName(),
                 user.getAuthToken(),
                 user.getPatientFhirId(),
+                user.getPatientResourceUrl(),
                 "Login successful"
         );
     }

@@ -8,7 +8,7 @@ const navItems = [
 ];
 
 export default function AppShell() {
-  const { username, displayName, patientFhirId, logout } = useAuth();
+  const { username, displayName, patientFhirId, patientResourceUrl, logout } = useAuth();
   const navigate = useNavigate();
 
   const handleLogout = () => {
@@ -37,6 +37,16 @@ export default function AppShell() {
               <p className="mt-1 text-lg font-bold text-slate-900">{displayName || username}</p>
               {patientFhirId ? (
                 <p className="mt-1 text-xs text-slate-500">Patient/{patientFhirId}</p>
+              ) : null}
+              {patientResourceUrl ? (
+                <a
+                  href={patientResourceUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="mt-2 inline-block text-xs font-semibold text-[var(--teal)] underline decoration-transparent transition hover:decoration-inherit"
+                >
+                  查看雲端 FHIR Patient
+                </a>
               ) : null}
             </div>
           </div>

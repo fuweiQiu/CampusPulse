@@ -28,6 +28,9 @@ public class ObservationRecord {
     @Column(nullable = false, unique = true, length = 64)
     private String fhirId;
 
+    @Column(length = 255)
+    private String resourceUrl;
+
     @Column(nullable = false, length = 20)
     private String status;
 
@@ -102,6 +105,14 @@ public class ObservationRecord {
 
     public void setFhirId(String fhirId) {
         this.fhirId = fhirId;
+    }
+
+    public String getResourceUrl() {
+        return resourceUrl;
+    }
+
+    public void setResourceUrl(String resourceUrl) {
+        this.resourceUrl = resourceUrl;
     }
 
     public String getStatus() {

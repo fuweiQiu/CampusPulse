@@ -7,6 +7,9 @@ export function AuthProvider({ children }) {
   const [username, setUsername] = useState(() => localStorage.getItem("campuspulse-username") || "");
   const [displayName, setDisplayName] = useState(() => localStorage.getItem("campuspulse-display-name") || "");
   const [patientFhirId, setPatientFhirId] = useState(() => localStorage.getItem("campuspulse-patient-fhir-id") || "");
+  const [patientResourceUrl, setPatientResourceUrl] = useState(
+    () => localStorage.getItem("campuspulse-patient-resource-url") || "",
+  );
 
   useEffect(() => {
     if (token) {
@@ -40,11 +43,26 @@ export function AuthProvider({ children }) {
     }
   }, [patientFhirId]);
 
-  const login = ({ token: nextToken, username: nextUsername, displayName: nextDisplayName, patientFhirId: nextPatientFhirId }) => {
+  useEffect(() => {
+    if (patientResourceUrl) {
+      localStorage.setItem("campuspulse-patient-resource-url", patientResourceUrl);
+    } else {
+      localStorage.removeItem("campuspulse-patient-resource-url");
+    }
+  }, [patientResourceUrl]);
+
+  const login = ({
+    token: nextToken,
+    username: nextUsername,
+    displayName: nextDisplayName,
+    patientFhirId: nextPatientFhirId,
+    patientResourceUrl: nextPatientResourceUrl,
+  }) => {
     setToken(nextToken);
     setUsername(nextUsername);
     setDisplayName(nextDisplayName || "");
     setPatientFhirId(nextPatientFhirId || "");
+    setPatientResourceUrl(nextPatientResourceUrl || "");
   };
 
   const logout = () => {
@@ -52,10 +70,13 @@ export function AuthProvider({ children }) {
     setUsername("");
     setDisplayName("");
     setPatientFhirId("");
+    setPatientResourceUrl("");
   };
 
   return (
-    <AuthContext.Provider value={{ token, username, displayName, patientFhirId, login, logout }}>
+    <AuthContext.Provider
+      value={{ token, username, displayName, patientFhirId, patientResourceUrl, login, logout }}
+    >
       {children}
     </AuthContext.Provider>
   );

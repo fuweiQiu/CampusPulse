@@ -26,6 +26,13 @@ app:
   jwt:
     secret: CampusPulseDemoSecretKeyCampusPulseDemoSecretKey2026
     expiration-days: 7
+  fhir:
+    remote:
+      enabled: true
+      fail-on-sync-error: false
+      base-url: https://hapi.fhir.org/baseR4
+      connect-timeout-seconds: 10
+      read-timeout-seconds: 20
 
 logging:
   level:

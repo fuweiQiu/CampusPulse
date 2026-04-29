@@ -210,6 +210,21 @@ export default function ChatPage() {
                       {formatDateTime(conversation.latestObservation.effectiveDateTime)}
                     </dd>
                   </div>
+                  {conversation.latestObservation.resourceUrl ? (
+                    <div className="grid gap-1 sm:grid-cols-[140px_minmax(0,1fr)] sm:items-center sm:gap-4">
+                      <dt>Cloud Resource</dt>
+                      <dd>
+                        <a
+                          href={conversation.latestObservation.resourceUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="break-all font-semibold text-[var(--teal)] underline decoration-transparent transition hover:decoration-inherit"
+                        >
+                          {conversation.latestObservation.resourceUrl}
+                        </a>
+                      </dd>
+                    </div>
+                  ) : null}
                 </dl>
                 <div className="mt-4 rounded-2xl bg-slate-50 px-4 py-4">
                   <p className="break-words text-sm leading-7 text-slate-600">

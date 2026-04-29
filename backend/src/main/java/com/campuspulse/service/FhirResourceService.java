@@ -1,10 +1,17 @@
 package com.campuspulse.service;
 
 import java.math.BigDecimal;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.sql.Date;
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -21,16 +28,24 @@ import org.hl7.fhir.r4.model.CodeableConcept;
 import org.hl7.fhir.r4.model.Coding;
 import org.hl7.fhir.r4.model.DateTimeType;
 import org.hl7.fhir.r4.model.Enumerations;
+import org.hl7.fhir.r4.model.IdType;
 import org.hl7.fhir.r4.model.IntegerType;
 import org.hl7.fhir.r4.model.Observation;
 import org.hl7.fhir.r4.model.Patient;
 import org.hl7.fhir.r4.model.Quantity;
 import org.hl7.fhir.r4.model.Reference;
+import org.hl7.fhir.r4.model.Resource;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 @Service
 public class FhirResourceService {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(FhirResourceService.class);
 
     private static final String OBSERVATION_CATEGORY_SYSTEM = "http://terminology.hl7.org/CodeSystem/observation-category";
     private static final String DATA_ABSENT_REASON_SYSTEM = "http://terminology.hl7.org/CodeSystem/data-absent-reason";
@@ -41,29 +56,146 @@ public class FhirResourceService {
     private final FhirContext fhirContext;
     private final ObjectMapper objectMapper;
     private final ObservationRecordRepository observationRecordRepository;
+    private final boolean remoteSyncEnabled;
+    private final boolean failOnCloudSyncError;
+    private final String remoteBaseUrl;
+    private final Duration readTimeout;
+    private final HttpClient httpClient;
 
     public FhirResourceService(
             FhirContext fhirContext,
             ObjectMapper objectMapper,
-            ObservationRecordRepository observationRecordRepository
+            ObservationRecordRepository observationRecordRepository,
+            @Value("${app.fhir.remote.enabled:true}") boolean remoteSyncEnabled,
+            @Value("${app.fhir.remote.fail-on-sync-error:false}") boolean failOnCloudSyncError,
+            @Value("${app.fhir.remote.base-url:https://hapi.fhir.org/baseR4}") String remoteBaseUrl,
+            @Value("${app.fhir.remote.connect-timeout-seconds:10}") long connectTimeoutSeconds,
+            @Value("${app.fhir.remote.read-timeout-seconds:20}") long readTimeoutSeconds
     ) {
         this.fhirContext = fhirContext;
         this.objectMapper = objectMapper;
         this.observationRecordRepository = observationRecordRepository;
+        this.remoteSyncEnabled = remoteSyncEnabled;
+        this.failOnCloudSyncError = failOnCloudSyncError;
+        this.remoteBaseUrl = normalizeBaseUrl(remoteBaseUrl);
+        this.readTimeout = Duration.ofSeconds(readTimeoutSeconds);
+        this.httpClient = HttpClient.newBuilder()
+                .connectTimeout(Duration.ofSeconds(connectTimeoutSeconds))
+                .build();
     }
 
     public void syncPatientResource(User user) {
-        if (user.getPatientFhirId() == null || user.getPatientFhirId().isBlank()) {
-            user.setPatientFhirId(UUID.randomUUID().toString());
+        Patient patient = buildPatient(user);
+
+        if (!remoteSyncEnabled) {
+            persistLocalPatient(user, patient);
+            return;
         }
 
+        try {
+            Patient syncedPatient;
+            if (user.getPatientFhirId() == null || user.getPatientFhirId().isBlank()) {
+                syncedPatient = createRemote("Patient", patient, Patient.class);
+            } else {
+                patient.setId(user.getPatientFhirId());
+                syncedPatient = updateRemote("Patient", user.getPatientFhirId(), patient, Patient.class);
+            }
+            applySyncedPatient(user, syncedPatient);
+        } catch (Exception exception) {
+            handleCloudSyncFailure("patient", exception);
+            persistLocalPatient(user, patient);
+        }
+    }
+
+    public ObservationRecord createObservationRecord(User user, ChatSession session, String suggestion) {
+        LocalDateTime now = LocalDateTime.now();
+        Observation observation = buildObservation(user, session, suggestion, now);
+
+        Observation persistedObservation = observation;
+        String resourceUrl = null;
+
+        if (remoteSyncEnabled && user.getPatientResourceUrl() != null && !user.getPatientResourceUrl().isBlank()) {
+            try {
+                persistedObservation = createRemote("Observation", observation, Observation.class);
+                resourceUrl = resourceUrl("Observation", persistedObservation.getIdElement().getIdPart());
+            } catch (Exception exception) {
+                handleCloudSyncFailure("observation", exception);
+                persistedObservation = persistLocalObservation(observation);
+            }
+        } else {
+            persistedObservation = persistLocalObservation(observation);
+        }
+
+        ObservationRecord record = new ObservationRecord();
+        record.setUser(user);
+        record.setFhirId(persistedObservation.getIdElement().getIdPart());
+        record.setResourceUrl(resourceUrl);
+        record.setStatus(persistedObservation.getStatus().toCode());
+        record.setCategoryCode("survey");
+        record.setCodeSystem(CAMPUSPULSE_SYSTEM);
+        record.setCodeValue("student-wellbeing-panel");
+        record.setCodeDisplay("Student Wellbeing Panel");
+        record.setEffectiveDateTime(now);
+        record.setIssuedAt(now);
+        record.setStressScore(session.getStressScore());
+        record.setSleepHours(session.getSleepHours());
+        record.setStressAbsentReasonCode(session.getStressAbsentReasonCode());
+        record.setSleepAbsentReasonCode(session.getSleepAbsentReasonCode());
+        record.setEmotionAbsentReasonCode(session.getEmotionAbsentReasonCode());
+        record.setEmotionCode(session.getEmotionCode());
+        record.setEmotionDisplay(session.getEmotionDisplay());
+        record.setSourceText(session.getSourceText());
+        record.setSuggestion(suggestion);
+        record.setResourceJson(encode(persistedObservation));
+        return observationRecordRepository.save(record);
+    }
+
+    @Transactional(readOnly = true)
+    public Object patientResource(User user) {
+        return readJson(user.getPatientResourceJson());
+    }
+
+    @Transactional(readOnly = true)
+    public List<Object> observationResources(User user) {
+        return observationRecordRepository.findByUserOrderByEffectiveDateTimeAsc(user)
+                .stream()
+                .map(record -> readJson(record.getResourceJson()))
+                .toList();
+    }
+
+    @Transactional(readOnly = true)
+    public Object exportBundle(User user) {
+        List<ObservationRecord> records = observationRecordRepository.findByUserOrderByEffectiveDateTimeAsc(user);
+
+        Bundle bundle = new Bundle();
+        bundle.setType(Bundle.BundleType.COLLECTION);
+        bundle.addEntry().setResource(parsePatient(user.getPatientResourceJson()));
+        for (ObservationRecord record : records) {
+            bundle.addEntry().setResource(parseObservation(record.getResourceJson()));
+        }
+        return readJson(encode(bundle));
+    }
+
+    public Object readJson(String json) {
+        try {
+            return objectMapper.readValue(json, Object.class);
+        } catch (Exception exception) {
+            throw new IllegalStateException("Unable to read FHIR resource JSON", exception);
+        }
+    }
+
+    private Patient buildPatient(User user) {
         Patient patient = new Patient();
-        patient.setId(user.getPatientFhirId());
+        if (user.getPatientFhirId() != null && !user.getPatientFhirId().isBlank()) {
+            patient.setId(user.getPatientFhirId());
+        }
         patient.setActive(true);
         patient.addIdentifier()
                 .setSystem(CAMPUSPULSE_IDENTIFIER_SYSTEM)
                 .setValue(user.getUsername());
-        patient.addName().setText(patientDisplay(user));
+        patient.addName()
+                .setText(patientDisplay(user))
+                .setFamily(user.getDisplayName() == null || user.getDisplayName().isBlank() ? user.getUsername() : user.getDisplayName());
 
         if (user.getBirthDate() != null) {
             patient.setBirthDate(Date.valueOf(user.getBirthDate()));
@@ -73,14 +205,25 @@ public class FhirResourceService {
         } else {
             patient.setGender(Enumerations.AdministrativeGender.UNKNOWN);
         }
+        return patient;
+    }
 
+    private void persistLocalPatient(User user, Patient patient) {
+        if (user.getPatientFhirId() == null || user.getPatientFhirId().isBlank()) {
+            user.setPatientFhirId(UUID.randomUUID().toString());
+        }
+        patient.setId(user.getPatientFhirId());
         user.setPatientResourceJson(encode(patient));
     }
 
-    public ObservationRecord createObservationRecord(User user, ChatSession session, String suggestion) {
-        LocalDateTime now = LocalDateTime.now();
+    private void applySyncedPatient(User user, Patient patient) {
+        user.setPatientFhirId(patient.getIdElement().getIdPart());
+        user.setPatientResourceUrl(resourceUrl("Patient", patient.getIdElement().getIdPart()));
+        user.setPatientResourceJson(encode(patient));
+    }
+
+    private Observation buildObservation(User user, ChatSession session, String suggestion, LocalDateTime now) {
         Observation observation = new Observation();
-        observation.setId(UUID.randomUUID().toString());
         observation.setStatus(Observation.ObservationStatus.FINAL);
         observation.addCategory(codeable(OBSERVATION_CATEGORY_SYSTEM, "survey", "Survey"));
         observation.setCode(codeable(CAMPUSPULSE_SYSTEM, "student-wellbeing-panel", "Student Wellbeing Panel"));
@@ -122,62 +265,62 @@ public class FhirResourceService {
             emotionComponent.setDataAbsentReason(codeable(DATA_ABSENT_REASON_SYSTEM, session.getEmotionAbsentReasonCode(), "Unknown"));
         }
         observation.addComponent(emotionComponent);
-
-        ObservationRecord record = new ObservationRecord();
-        record.setUser(user);
-        record.setFhirId(observation.getIdElement().getIdPart());
-        record.setStatus(observation.getStatus().toCode());
-        record.setCategoryCode("survey");
-        record.setCodeSystem(CAMPUSPULSE_SYSTEM);
-        record.setCodeValue("student-wellbeing-panel");
-        record.setCodeDisplay("Student Wellbeing Panel");
-        record.setEffectiveDateTime(now);
-        record.setIssuedAt(now);
-        record.setStressScore(session.getStressScore());
-        record.setSleepHours(session.getSleepHours());
-        record.setStressAbsentReasonCode(session.getStressAbsentReasonCode());
-        record.setSleepAbsentReasonCode(session.getSleepAbsentReasonCode());
-        record.setEmotionAbsentReasonCode(session.getEmotionAbsentReasonCode());
-        record.setEmotionCode(session.getEmotionCode());
-        record.setEmotionDisplay(session.getEmotionDisplay());
-        record.setSourceText(session.getSourceText());
-        record.setSuggestion(suggestion);
-        record.setResourceJson(encode(observation));
-        return observationRecordRepository.save(record);
+        return observation;
     }
 
-    @Transactional(readOnly = true)
-    public Object patientResource(User user) {
-        return readJson(user.getPatientResourceJson());
-    }
-
-    @Transactional(readOnly = true)
-    public List<Object> observationResources(User user) {
-        return observationRecordRepository.findByUserOrderByEffectiveDateTimeAsc(user)
-                .stream()
-                .map(record -> readJson(record.getResourceJson()))
-                .toList();
-    }
-
-    @Transactional(readOnly = true)
-    public Object exportBundle(User user) {
-        List<ObservationRecord> records = observationRecordRepository.findByUserOrderByEffectiveDateTimeAsc(user);
-
-        Bundle bundle = new Bundle();
-        bundle.setType(Bundle.BundleType.COLLECTION);
-        bundle.addEntry().setResource(parsePatient(user.getPatientResourceJson()));
-        for (ObservationRecord record : records) {
-            bundle.addEntry().setResource(parseObservation(record.getResourceJson()));
+    private Observation persistLocalObservation(Observation observation) {
+        if (!observation.hasId()) {
+            observation.setId(UUID.randomUUID().toString());
         }
-        return readJson(encode(bundle));
+        return observation;
     }
 
-    public Object readJson(String json) {
-        try {
-            return objectMapper.readValue(json, Object.class);
-        } catch (Exception exception) {
-            throw new IllegalStateException("Unable to read FHIR resource JSON", exception);
+    private <T extends Resource> T createRemote(String resourceType, T resource, Class<T> responseType) throws Exception {
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(remoteBaseUrl + "/" + resourceType))
+                .header("Accept", "application/fhir+json")
+                .header("Content-Type", "application/fhir+json; charset=UTF-8")
+                .header("Prefer", "return=representation")
+                .timeout(readTimeout)
+                .POST(HttpRequest.BodyPublishers.ofString(encode(resource), StandardCharsets.UTF_8))
+                .build();
+        return sendRemote(request, responseType, resource);
+    }
+
+    private <T extends Resource> T updateRemote(String resourceType, String resourceId, T resource, Class<T> responseType) throws Exception {
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(remoteBaseUrl + "/" + resourceType + "/" + resourceId))
+                .header("Accept", "application/fhir+json")
+                .header("Content-Type", "application/fhir+json; charset=UTF-8")
+                .header("Prefer", "return=representation")
+                .timeout(readTimeout)
+                .PUT(HttpRequest.BodyPublishers.ofString(encode(resource), StandardCharsets.UTF_8))
+                .build();
+        return sendRemote(request, responseType, resource);
+    }
+
+    private <T extends Resource> T sendRemote(HttpRequest request, Class<T> responseType, T fallbackResource) throws Exception {
+        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+        if (response.statusCode() < 200 || response.statusCode() >= 300) {
+            throw new IllegalStateException("FHIR server returned HTTP " + response.statusCode() + ": " + response.body());
         }
+
+        if (response.body() != null && !response.body().isBlank()) {
+            return responseType.cast(fhirContext.newJsonParser().parseResource(responseType, response.body()));
+        }
+
+        String location = response.headers().firstValue("Location").orElse(null);
+        if (location != null && !location.isBlank()) {
+            fallbackResource.setId(new IdType(location).getIdPart());
+        }
+        return fallbackResource;
+    }
+
+    private void handleCloudSyncFailure(String resourceType, Exception exception) {
+        if (failOnCloudSyncError) {
+            throw new ApiException(HttpStatus.BAD_GATEWAY, "Unable to sync " + resourceType + " to cloud FHIR server");
+        }
+        LOGGER.warn("Unable to sync {} to remote FHIR server {}: {}", resourceType, remoteBaseUrl, exception.getMessage());
     }
 
     private String encode(org.hl7.fhir.instance.model.api.IBaseResource resource) {
@@ -198,7 +341,7 @@ public class FhirResourceService {
     }
 
     private Enumerations.AdministrativeGender parseGender(String gender) {
-        return switch (gender.toLowerCase(java.util.Locale.ROOT)) {
+        return switch (gender.toLowerCase(Locale.ROOT)) {
             case "male" -> Enumerations.AdministrativeGender.MALE;
             case "female" -> Enumerations.AdministrativeGender.FEMALE;
             case "other" -> Enumerations.AdministrativeGender.OTHER;
@@ -214,5 +357,16 @@ public class FhirResourceService {
         return user.getDisplayName() == null || user.getDisplayName().isBlank()
                 ? user.getUsername()
                 : user.getDisplayName();
+    }
+
+    private String resourceUrl(String resourceType, String resourceId) {
+        return remoteBaseUrl + "/" + resourceType + "/" + resourceId;
+    }
+
+    private String normalizeBaseUrl(String value) {
+        if (value == null || value.isBlank()) {
+            return "https://hapi.fhir.org/baseR4";
+        }
+        return value.endsWith("/") ? value.substring(0, value.length() - 1) : value;
     }
 }

@@ -5,6 +5,7 @@ import java.time.LocalDateTime;
 public record ObservationSummaryResponse(
         Long recordId,
         String fhirId,
+        String resourceUrl,
         String status,
         Integer stressScore,
         Double sleepHours,
