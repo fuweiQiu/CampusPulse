@@ -9,6 +9,9 @@ const starterPrompts = [
   "昨天只睡 4.5 小時，今天有點焦慮也很累。",
   "今天心情比較平靜，壓力大概 3 分。",
 ];
+// const starterPrompt1 = "這週報告跟考試一起來，現在壓力大概 8 分。";
+// const starterPrompt2 = "昨天只睡 4.5 小時，今天有點焦慮也很累。";
+// const starterPrompt3 = "今天心情比較平靜，壓力大概 3 分。"
 
 const pendingFieldLabels = {
   STRESS_SCORE: "等待補充壓力分數",
@@ -122,14 +125,14 @@ export default function ChatPage() {
 
         <div className="border-t border-white/70 px-4 py-4 sm:px-6 md:px-8">
           <div className="mb-4 flex flex-wrap gap-2">
-            {starterPrompts.map((prompt) => (
+            {starterPrompts.map((prompt, idx) => (
               <button
                 key={prompt}
                 type="button"
                 onClick={() => setMessage(prompt)}
                 className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-600 transition hover:border-slate-300 hover:text-slate-900"
               >
-                套用範例
+                套用範例{idx + 1}
               </button>
             ))}
           </div>

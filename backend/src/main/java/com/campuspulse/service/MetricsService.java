@@ -11,19 +11,18 @@ import java.util.stream.Collectors;
 import com.campuspulse.dto.MetricsResponse;
 import com.campuspulse.model.ObservationRecord;
 import com.campuspulse.model.User;
-import com.campuspulse.repository.ObservationRecordRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 @Service
 public class MetricsService {
 
-    private final ObservationRecordRepository observationRecordRepository;
     private final AuthService authService;
+    private final FhirResourceService fhirResourceService;
 
-    public MetricsService(ObservationRecordRepository observationRecordRepository, AuthService authService) {
-        this.observationRecordRepository = observationRecordRepository;
+    public MetricsService(AuthService authService, FhirResourceService fhirResourceService) {
         this.authService = authService;
+        this.fhirResourceService = fhirResourceService;
     }
 
     @Transactional(readOnly = true)
@@ -33,8 +32,7 @@ public class MetricsService {
         LocalDateTime start = startDate.atStartOfDay();
         LocalDateTime end = LocalDateTime.now();
 
-        List<ObservationRecord> observations = observationRecordRepository
-                .findByUserAndEffectiveDateTimeBetweenOrderByEffectiveDateTimeAsc(user, start, end);
+        List<ObservationRecord> observations = fhirResourceService.preferredObservationRecords(user, start, end);
 
         List<ObservationRecord> stressObservations = observations.stream()
                 .filter(observation -> observation.getStressScore() != null)

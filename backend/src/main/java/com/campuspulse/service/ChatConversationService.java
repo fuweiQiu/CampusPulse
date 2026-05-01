@@ -16,7 +16,6 @@ import com.campuspulse.model.PendingField;
 import com.campuspulse.model.User;
 import com.campuspulse.repository.ChatMessageRepository;
 import com.campuspulse.repository.ChatSessionRepository;
-import com.campuspulse.repository.ObservationRecordRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -28,7 +27,6 @@ public class ChatConversationService {
     private final AuthService authService;
     private final ChatSessionRepository chatSessionRepository;
     private final ChatMessageRepository chatMessageRepository;
-    private final ObservationRecordRepository observationRecordRepository;
     private final ChatInsightExtractor chatInsightExtractor;
     private final FhirResourceService fhirResourceService;
 
@@ -36,14 +34,12 @@ public class ChatConversationService {
             AuthService authService,
             ChatSessionRepository chatSessionRepository,
             ChatMessageRepository chatMessageRepository,
-            ObservationRecordRepository observationRecordRepository,
             ChatInsightExtractor chatInsightExtractor,
             FhirResourceService fhirResourceService
     ) {
         this.authService = authService;
         this.chatSessionRepository = chatSessionRepository;
         this.chatMessageRepository = chatMessageRepository;
-        this.observationRecordRepository = observationRecordRepository;
         this.chatInsightExtractor = chatInsightExtractor;
         this.fhirResourceService = fhirResourceService;
     }
@@ -91,7 +87,7 @@ public class ChatConversationService {
     public ChatConversationResponse history(String token) {
         User user = authService.authenticate(token);
         ChatSession activeSession = chatSessionRepository.findFirstByUserAndStatusOrderByUpdatedAtDesc(user, ChatSessionStatus.COLLECTING).orElse(null);
-        ObservationRecord latestRecord = observationRecordRepository.findTopByUserOrderByEffectiveDateTimeDesc(user).orElse(null);
+        ObservationRecord latestRecord = fhirResourceService.preferredLatestObservationRecord(user);
         return buildResponse(user, activeSession, latestRecord);
     }
 
@@ -210,7 +206,7 @@ public class ChatConversationService {
 
         ObservationRecord record = latestRecord != null
                 ? latestRecord
-                : observationRecordRepository.findTopByUserOrderByEffectiveDateTimeDesc(user).orElse(null);
+                : fhirResourceService.preferredLatestObservationRecord(user);
 
         ObservationSummaryResponse summary = record == null
                 ? null

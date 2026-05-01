@@ -2,14 +2,18 @@ package com.campuspulse.service;
 
 import java.math.BigDecimal;
 import java.net.URI;
+import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.sql.Date;
 import java.time.Duration;
+import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
@@ -152,28 +156,51 @@ public class FhirResourceService {
 
     @Transactional(readOnly = true)
     public Object patientResource(User user) {
-        return readJson(user.getPatientResourceJson());
+        Patient patient = fetchPreferredPatient(user);
+        return readJson(encode(patient));
     }
 
     @Transactional(readOnly = true)
     public List<Object> observationResources(User user) {
-        return observationRecordRepository.findByUserOrderByEffectiveDateTimeAsc(user)
+        return fetchPreferredObservations(user)
                 .stream()
-                .map(record -> readJson(record.getResourceJson()))
+                .map(this::encode)
+                .map(this::readJson)
                 .toList();
     }
 
     @Transactional(readOnly = true)
     public Object exportBundle(User user) {
-        List<ObservationRecord> records = observationRecordRepository.findByUserOrderByEffectiveDateTimeAsc(user);
-
         Bundle bundle = new Bundle();
         bundle.setType(Bundle.BundleType.COLLECTION);
-        bundle.addEntry().setResource(parsePatient(user.getPatientResourceJson()));
-        for (ObservationRecord record : records) {
-            bundle.addEntry().setResource(parseObservation(record.getResourceJson()));
+        bundle.addEntry().setResource(fetchPreferredPatient(user));
+        for (Observation observation : fetchPreferredObservations(user)) {
+            bundle.addEntry().setResource(observation);
         }
         return readJson(encode(bundle));
+    }
+
+    @Transactional(readOnly = true)
+    public List<ObservationRecord> preferredObservationRecords(User user, LocalDateTime start, LocalDateTime end) {
+        Optional<List<ObservationRecord>> remoteRecords = tryFetchRemoteObservationRecords(user);
+        if (remoteRecords.isPresent()) {
+            return remoteRecords.get().stream()
+                    .filter(record -> !record.getEffectiveDateTime().isBefore(start) && !record.getEffectiveDateTime().isAfter(end))
+                    .sorted(Comparator.comparing(ObservationRecord::getEffectiveDateTime))
+                    .toList();
+        }
+        return observationRecordRepository.findByUserAndEffectiveDateTimeBetweenOrderByEffectiveDateTimeAsc(user, start, end);
+    }
+
+    @Transactional(readOnly = true)
+    public ObservationRecord preferredLatestObservationRecord(User user) {
+        Optional<List<ObservationRecord>> remoteRecords = tryFetchRemoteObservationRecords(user);
+        if (remoteRecords.isPresent()) {
+            return remoteRecords.get().stream()
+                    .max(Comparator.comparing(ObservationRecord::getEffectiveDateTime))
+                    .orElse(null);
+        }
+        return observationRecordRepository.findTopByUserOrderByEffectiveDateTimeDesc(user).orElse(null);
     }
 
     public Object readJson(String json) {
@@ -206,6 +233,22 @@ public class FhirResourceService {
             patient.setGender(Enumerations.AdministrativeGender.UNKNOWN);
         }
         return patient;
+    }
+
+    private Patient fetchPreferredPatient(User user) {
+        Optional<Patient> remotePatient = tryFetchRemotePatient(user);
+        return remotePatient.orElseGet(() -> parsePatient(user.getPatientResourceJson()));
+    }
+
+    private List<Observation> fetchPreferredObservations(User user) {
+        Optional<List<Observation>> remoteObservations = tryFetchRemoteObservations(user);
+        if (remoteObservations.isPresent()) {
+            return remoteObservations.get();
+        }
+        return observationRecordRepository.findByUserOrderByEffectiveDateTimeAsc(user)
+                .stream()
+                .map(record -> parseObservation(record.getResourceJson()))
+                .toList();
     }
 
     private void persistLocalPatient(User user, Patient patient) {
@@ -268,6 +311,82 @@ public class FhirResourceService {
         return observation;
     }
 
+    private Optional<Patient> tryFetchRemotePatient(User user) {
+        if (!remoteSyncEnabled || user.getPatientFhirId() == null || user.getPatientFhirId().isBlank()) {
+            return Optional.empty();
+        }
+
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(resourceUrl("Patient", user.getPatientFhirId())))
+                    .header("Accept", "application/fhir+json")
+                    .timeout(readTimeout)
+                    .GET()
+                    .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            if (response.statusCode() < 200 || response.statusCode() >= 300 || response.body() == null || response.body().isBlank()) {
+                throw new IllegalStateException("FHIR server returned HTTP " + response.statusCode());
+            }
+            return Optional.of((Patient) fhirContext.newJsonParser().parseResource(response.body()));
+        } catch (Exception exception) {
+            LOGGER.warn("Unable to fetch patient from remote FHIR server {}: {}. Falling back to local cache.", remoteBaseUrl, exception.getMessage());
+            return Optional.empty();
+        }
+    }
+
+    private Optional<List<Observation>> tryFetchRemoteObservations(User user) {
+        if (!remoteSyncEnabled || user.getPatientFhirId() == null || user.getPatientFhirId().isBlank()) {
+            return Optional.empty();
+        }
+
+        try {
+            List<Observation> observations = new ArrayList<>();
+            String nextUrl = remoteBaseUrl
+                    + "/Observation?subject="
+                    + URLEncoder.encode("Patient/" + user.getPatientFhirId(), StandardCharsets.UTF_8)
+                    + "&_sort=date&_count=200";
+
+            for (int page = 0; page < 10 && nextUrl != null; page++) {
+                HttpRequest request = HttpRequest.newBuilder()
+                        .uri(URI.create(nextUrl))
+                        .header("Accept", "application/fhir+json")
+                        .timeout(readTimeout)
+                        .GET()
+                        .build();
+                HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+                if (response.statusCode() < 200 || response.statusCode() >= 300 || response.body() == null || response.body().isBlank()) {
+                    throw new IllegalStateException("FHIR server returned HTTP " + response.statusCode());
+                }
+
+                Bundle bundle = (Bundle) fhirContext.newJsonParser().parseResource(response.body());
+                bundle.getEntry().stream()
+                        .map(Bundle.BundleEntryComponent::getResource)
+                        .filter(Observation.class::isInstance)
+                        .map(Observation.class::cast)
+                        .forEach(observations::add);
+
+                nextUrl = bundle.getLink().stream()
+                        .filter(link -> "next".equals(link.getRelation()))
+                        .map(link -> link.getUrl())
+                        .findFirst()
+                        .orElse(null);
+            }
+
+            observations.sort(Comparator.comparing(this::observationDateTime));
+            return Optional.of(observations);
+        } catch (Exception exception) {
+            LOGGER.warn("Unable to fetch observations from remote FHIR server {}: {}. Falling back to local cache.", remoteBaseUrl, exception.getMessage());
+            return Optional.empty();
+        }
+    }
+
+    private Optional<List<ObservationRecord>> tryFetchRemoteObservationRecords(User user) {
+        Optional<List<Observation>> remoteObservations = tryFetchRemoteObservations(user);
+        return remoteObservations.map(observations -> observations.stream()
+                .map(this::toObservationRecordSnapshot)
+                .toList());
+    }
+
     private Observation persistLocalObservation(Observation observation) {
         if (!observation.hasId()) {
             observation.setId(UUID.randomUUID().toString());
@@ -316,6 +435,66 @@ public class FhirResourceService {
         return fallbackResource;
     }
 
+    private ObservationRecord toObservationRecordSnapshot(Observation observation) {
+        ObservationRecord record = new ObservationRecord();
+        record.setFhirId(observation.getIdElement().getIdPart());
+        record.setResourceUrl(resourceUrl("Observation", observation.getIdElement().getIdPart()));
+        record.setStatus(observation.getStatus() == null ? null : observation.getStatus().toCode());
+
+        Coding categoryCoding = observation.getCategoryFirstRep().getCodingFirstRep();
+        record.setCategoryCode(categoryCoding == null ? null : categoryCoding.getCode());
+
+        Coding mainCoding = observation.getCode().getCodingFirstRep();
+        if (mainCoding != null) {
+            record.setCodeSystem(mainCoding.getSystem());
+            record.setCodeValue(mainCoding.getCode());
+            record.setCodeDisplay(mainCoding.getDisplay());
+        }
+
+        LocalDateTime effectiveDateTime = observationDateTime(observation);
+        record.setEffectiveDateTime(effectiveDateTime);
+        record.setIssuedAt(observation.getIssued() == null ? effectiveDateTime : toLocalDateTime(observation.getIssued().toInstant()));
+
+        for (Observation.ObservationComponentComponent component : observation.getComponent()) {
+            String componentCode = component.getCode().getCodingFirstRep().getCode();
+            if ("stress-score".equals(componentCode)) {
+                if (component.hasValueIntegerType()) {
+                    record.setStressScore(component.getValueIntegerType().getValue());
+                } else if (component.hasDataAbsentReason()) {
+                    record.setStressAbsentReasonCode(component.getDataAbsentReason().getCodingFirstRep().getCode());
+                }
+            } else if ("sleep-duration-hours".equals(componentCode)) {
+                if (component.hasValueQuantity()) {
+                    record.setSleepHours(component.getValueQuantity().getValue().doubleValue());
+                } else if (component.hasDataAbsentReason()) {
+                    record.setSleepAbsentReasonCode(component.getDataAbsentReason().getCodingFirstRep().getCode());
+                }
+            } else if ("self-reported-emotion".equals(componentCode)) {
+                if (component.hasValueCodeableConcept()) {
+                    CodeableConcept concept = component.getValueCodeableConcept();
+                    record.setEmotionCode(concept.getCodingFirstRep().getCode());
+                    record.setEmotionDisplay(concept.getCodingFirstRep().getDisplay());
+                } else if (component.hasDataAbsentReason()) {
+                    record.setEmotionAbsentReasonCode(component.getDataAbsentReason().getCodingFirstRep().getCode());
+                }
+            }
+        }
+
+        for (Annotation note : observation.getNote()) {
+            if (note.getText() == null) {
+                continue;
+            }
+            if (note.getText().startsWith("Source narrative: ")) {
+                record.setSourceText(note.getText().substring("Source narrative: ".length()));
+            } else if (note.getText().startsWith("CampusPulse assistant summary: ")) {
+                record.setSuggestion(note.getText().substring("CampusPulse assistant summary: ".length()));
+            }
+        }
+
+        record.setResourceJson(encode(observation));
+        return record;
+    }
+
     private void handleCloudSyncFailure(String resourceType, Exception exception) {
         if (failOnCloudSyncError) {
             throw new ApiException(HttpStatus.BAD_GATEWAY, "Unable to sync " + resourceType + " to cloud FHIR server");
@@ -351,6 +530,20 @@ public class FhirResourceService {
 
     private java.util.Date toDate(LocalDateTime dateTime) {
         return java.util.Date.from(dateTime.atZone(ZoneId.systemDefault()).toInstant());
+    }
+
+    private LocalDateTime toLocalDateTime(Instant instant) {
+        return LocalDateTime.ofInstant(instant, ZoneId.systemDefault());
+    }
+
+    private LocalDateTime observationDateTime(Observation observation) {
+        if (observation.getEffectiveDateTimeType() != null && observation.getEffectiveDateTimeType().getValue() != null) {
+            return toLocalDateTime(observation.getEffectiveDateTimeType().getValue().toInstant());
+        }
+        if (observation.getIssued() != null) {
+            return toLocalDateTime(observation.getIssued().toInstant());
+        }
+        return LocalDateTime.now();
     }
 
     private String patientDisplay(User user) {

@@ -90,6 +90,8 @@ app:
 - `enabled=true`：啟用雲端同步
 - `fail-on-sync-error=false`：若 public server 暫時不可用，系統仍保留本地 FHIR JSON，不會直接中斷註冊或聊天流程
 - 註冊 / 登入成功後，前端頁首會顯示雲端 `Patient` 連結
+- 目前 `Patient` / `Observation` / `Bundle` / dashboard metrics 會優先從 HAPI FHIR server 調閱；若 timeout 或網路失敗，才退回本地 H2 快取
+- 聊天訊息與匿名社群貼文不屬於 FHIR resource，仍以本地 H2 為主
 
 ## Python for FHIR 規則範例
 
